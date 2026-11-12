@@ -100,6 +100,24 @@ public final class CodeSignProvider: SigningProviding {
                 isAdHoc = (flags & adhocBit) != 0
             }
 
+            // Seal validity alone does not evaluate the certificate chain, so a
+            // self-signed certificate with a look-alike name would pass. Only
+            // report signer identity when the chain is trusted by the system.
+            if status == .signed && !isAdHoc {
+                var trustedRequirement: SecRequirement?
+                let trustedCreate = SecRequirementCreateWithString(
+                    "anchor trusted" as CFString, [], &trustedRequirement)
+                var chainTrusted = false
+                if trustedCreate == errSecSuccess, let trustedRequirement {
+                    chainTrusted = SecStaticCodeCheckValidity(
+                        code, checkFlags, trustedRequirement) == errSecSuccess
+                }
+                if !chainTrusted {
+                    teamID = nil
+                    authority = []
+                }
+            }
+
             if status == .unsigned || (status == .signed && isAdHoc) {
                 isPlatform = false
             } else if status == .signed {
@@ -120,6 +138,17 @@ public final class CodeSignProvider: SigningProviding {
                     }
                 }
             }
+        }
+
+        // The hash and the signature were read at different times. Re-hash and
+        // refuse to pair them if the file changed in between.
+        if Self.sha256Hex(path: path) != sha {
+            let changed = OSStatus(errSecCSStaticCodeChanged)
+            return SignatureInfo(
+                status: .invalid,
+                sha256: nil,
+                validationErrorCode: changed,
+                validationErrorMessage: Self.securityMessage(for: changed))
         }
 
         return SignatureInfo(

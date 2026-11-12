@@ -9,6 +9,7 @@
 //  Being an `actor` makes all of that state races-free and `Sendable`.
 //
 
+import CryptoKit
 import Foundation
 import os
 import ProcexpModel
@@ -159,7 +160,20 @@ actor VirusTotalClient {
 
         guard let url = cacheURL else { return }
         do {
-            let decoded = try JSONDecoder().decode([String: VirusTotalResult].self, from: Data(contentsOf: url))
+            let envelope = try JSONDecoder().decode(CacheEnvelope.self, from: Data(contentsOf: url))
+            guard let payload = Data(base64Encoded: envelope.payload),
+                  let tag = Data(base64Encoded: envelope.mac) else {
+                Logger(subsystem: "com.sysinternals.procexpmac", category: "VirusTotal")
+                    .error("Ignoring reputation cache with a malformed integrity envelope")
+                return
+            }
+            let key = try Keychain.cacheIntegrityKey()
+            guard HMAC<SHA256>.isValidAuthenticationCode(tag, authenticating: payload, using: key) else {
+                Logger(subsystem: "com.sysinternals.procexpmac", category: "VirusTotal")
+                    .error("Ignoring reputation cache that failed its integrity check")
+                return
+            }
+            let decoded = try JSONDecoder().decode([String: VirusTotalResult].self, from: payload)
             for (sha, result) in decoded {
                 guard result.positives >= 0, result.total >= 0, result.positives <= result.total else {
                     Logger(subsystem: "com.sysinternals.procexpmac", category: "VirusTotal")
@@ -179,13 +193,28 @@ actor VirusTotalClient {
     private func persistCache() {
         guard let url = cacheURL else { return }
         do {
+            let payload = try JSONEncoder().encode(cache)
+            let key = try Keychain.cacheIntegrityKey()
+            let tag = HMAC<SHA256>.authenticationCode(for: payload, using: key)
+            let envelope = CacheEnvelope(payload: payload.base64EncodedString(),
+                                         mac: Data(tag).base64EncodedString())
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try JSONEncoder().encode(cache).write(to: url, options: .atomic)
+            try JSONEncoder().encode(envelope).write(to: url, options: .atomic)
         } catch {
             Logger(subsystem: "com.sysinternals.procexpmac", category: "VirusTotal")
                 .error("Cannot persist reputation cache: \(error.localizedDescription)")
         }
     }
+}
+
+// MARK: - On-disk cache envelope
+
+/// The persisted cache: the JSON payload plus an HMAC-SHA256 tag keyed by a
+/// Keychain-held secret. A cache file rewritten by another process of the same
+/// user fails verification and is ignored.
+private struct CacheEnvelope: Codable {
+    let payload: String
+    let mac: String
 }
 
 // MARK: - VirusTotal v3 response shape (only the fields we consume)

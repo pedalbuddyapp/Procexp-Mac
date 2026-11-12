@@ -465,9 +465,12 @@ struct MainWindowView: View {
             .sorted { $0.id.pid < $1.id.pid }
         for r in records {
             func escape(_ s: String) -> String {
-                s.contains(",") || s.contains("\"") || s.contains("\n") || s.contains("\r")
-                    ? "\"\(s.replacingOccurrences(of: "\"", with: "\"\""))\""
-                    : s
+                // Prefix formula triggers so a spreadsheet treats the cell as text.
+                let value = (s.first.map { "=+-@\t\r".contains($0) } ?? false) ? "'" + s : s
+                return value.contains(",") || value.contains("\"")
+                    || value.contains("\n") || value.contains("\r")
+                    ? "\"\(value.replacingOccurrences(of: "\"", with: "\"\""))\""
+                    : value
             }
             let row = [
                 escape(r.name),

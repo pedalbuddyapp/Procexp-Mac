@@ -47,6 +47,15 @@ actor LaunchdIndex {
     /// Whether the index has been built at least once.
     private var isBuilt = false
 
+    /// Directories launchd searches when it resolves a bare `Program` name, so a
+    /// basename match is only meaningful for executables found there.
+    private static let pathResolvedDirectories: Set<String> = [
+        "/bin",
+        "/sbin",
+        "/usr/bin",
+        "/usr/sbin",
+    ]
+
     /// Ensures the index exists, building it on first use.
     private func ensureBuilt() {
         guard !isBuilt else { return }
@@ -67,6 +76,14 @@ actor LaunchdIndex {
         if let hit = byExecutablePath[resolved] {
             return hit
         }
+        // Only a job whose `Program` is a bare name is PATH-resolved by launchd;
+        // restrict the basename fallback to the directories launchd searches so an
+        // unrelated executable that merely shares a job's name is not attributed
+        // to that job's plist.
+        let directory = (resolved as NSString).deletingLastPathComponent
+        guard LaunchdIndex.pathResolvedDirectories.contains(directory) else {
+            return nil
+        }
         let base = (resolved as NSString).lastPathComponent
         return byBasename[base]
     }
@@ -78,6 +95,7 @@ actor LaunchdIndex {
         byBasename.removeAll(keepingCapacity: true)
 
         let fm = FileManager.default
+        let userDirectory = (NSHomeDirectory() as NSString).appendingPathComponent("Library/LaunchAgents")
         for directory in LaunchdIndex.searchDirectories {
             // Read-only enumeration; missing dirs / permission errors are ignored.
             guard let entries = try? fm.contentsOfDirectory(atPath: directory) else {
@@ -98,7 +116,10 @@ actor LaunchdIndex {
                 }
                 let base = (canonical as NSString).lastPathComponent
                 // Only a bare program name needs PATH resolution; explicit paths must not alias another executable.
-                if program == (program as NSString).lastPathComponent, byBasename[base] == nil {
+                // The user-writable directory is excluded: any local process could forge the label.
+                if directory != userDirectory,
+                    program == (program as NSString).lastPathComponent, byBasename[base] == nil
+                {
                     byBasename[base] = plistPath
                 }
             }

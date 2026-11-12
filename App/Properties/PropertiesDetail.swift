@@ -197,7 +197,7 @@ final class PropertiesDetail {
         }
 
         if let path = record?.executablePath, !path.isEmpty {
-            await verifySignature(path: path, signing: signing)
+            await verifySignature(path: path, signing: signing, processStart: record?.startTimeDate)
         }
     }
 
@@ -399,13 +399,25 @@ final class PropertiesDetail {
     }
 
     /// Runs a fresh code-signature verification for the image path.
-    func verifySignature(path: String, signing: any SigningProviding) async {
+    func verifySignature(path: String, signing: any SigningProviding, processStart: Date? = nil) async {
         verificationGeneration += 1
         let generation = verificationGeneration
         isVerifying = true
         defer { if verificationGeneration == generation { isVerifying = false } }
         var result = await signing.signature(forPath: path)
         guard !Task.isCancelled, verificationGeneration == generation else { return }
+        // The check reads the file now at `path`, not the running image. If the
+        // file changed after the process started, it cannot vouch for the process.
+        if let start = processStart, start > .distantPast {
+            var st = stat()
+            if stat(path, &st) == 0 {
+                let changed = Date(timeIntervalSince1970: TimeInterval(st.st_ctimespec.tv_sec))
+                if changed > start.addingTimeInterval(1) {
+                    result.status = .invalid
+                    result.validationErrorMessage = "the file on disk changed after the process started, so it does not describe the running code"
+                }
+            }
+        }
         // Preserve any VirusTotal result the user already fetched.
         if let sha = result.sha256, sha == signature?.sha256, result.virusTotal == nil {
             result.virusTotal = signature?.virusTotal

@@ -7,7 +7,17 @@ struct ProcessReportTable: Equatable {
     var rows: [[String]]
 
     var text: String {
-        ([headers] + rows).map { $0.joined(separator: "\t") + "\n" }.joined()
+        ([headers] + rows)
+            .map { $0.map { Self.escapeCell($0) }.joined(separator: "\t") + "\n" }
+            .joined()
+    }
+
+    /// Process names, paths and command lines can contain tabs and line breaks;
+    /// keep them inside one cell so they cannot add columns or rows.
+    static func escapeCell(_ cell: String) -> String {
+        cell.replacingOccurrences(of: "\t", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
     }
 }
 
@@ -18,7 +28,7 @@ struct ProcessReport {
     var data: Data {
         var text = processes.text + "\n"
         if let lowerPane {
-            text += "Process: \(lowerPane.name) Pid: \(lowerPane.pid)\n\n"
+            text += "Process: \(ProcessReportTable.escapeCell(lowerPane.name)) Pid: \(lowerPane.pid)\n\n"
             text += lowerPane.table.text
         }
         // Windows CRT text mode expands every LF, including LFs inside cells.

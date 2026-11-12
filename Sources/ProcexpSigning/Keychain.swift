@@ -7,6 +7,7 @@
 //  `CodeSignProvider.setAPIKey(_:)` and it is read back on demand.
 //
 
+import CryptoKit
 import Foundation
 import Security
 import ProcexpModel
@@ -57,6 +58,66 @@ enum Keychain {
             add[kSecValueData as String] = value[kSecValueData as String]
             status = SecItemAdd(add as CFDictionary, nil)
             // Another writer may have inserted the item after our update.
+            if status == errSecDuplicateItem {
+                status = SecItemUpdate(base as CFDictionary, value as CFDictionary)
+            }
+        }
+        guard status == errSecSuccess else {
+            throw failure("write", status: status)
+        }
+    }
+
+    /// Service/account for the cache-integrity key. Separate from the API key so
+    /// the on-disk reputation cache can be authenticated even when no API key is
+    /// configured.
+    static let cacheKeyService = "com.sysinternals.procexpmac.virustotal.cache-integrity"
+    static let cacheKeyAccount = "hmac-key"
+
+    /// Returns the key that authenticates the on-disk reputation cache, creating
+    /// it on first use. The Keychain ACL keeps other processes of the same user
+    /// from reading it, so a forged cache file fails verification.
+    static func cacheIntegrityKey() throws -> SymmetricKey {
+        if let existing = try readCacheIntegrityKey() { return existing }
+        var bytes = [UInt8](repeating: 0, count: 32)
+        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        guard status == errSecSuccess else { throw failure("generate", status: status) }
+        let key = SymmetricKey(data: Data(bytes))
+        try storeCacheIntegrityKey(key)
+        return key
+    }
+
+    private static func readCacheIntegrityKey() throws -> SymmetricKey? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: cacheKeyService,
+            kSecAttrAccount as String: cacheKeyAccount,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess else { throw failure("read", status: status) }
+        guard let data = item as? Data, data.count == 32 else {
+            throw ProviderError.underlying("Keychain cache-integrity key is not 32 bytes.")
+        }
+        return SymmetricKey(data: data)
+    }
+
+    private static func storeCacheIntegrityKey(_ key: SymmetricKey) throws {
+        let base: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: cacheKeyService,
+            kSecAttrAccount as String: cacheKeyAccount,
+        ]
+
+        let value = [kSecValueData as String: key.withUnsafeBytes { Data($0) }]
+        var status = SecItemUpdate(base as CFDictionary, value as CFDictionary)
+        if status == errSecItemNotFound {
+            var add = base
+            add[kSecValueData as String] = value[kSecValueData as String]
+            status = SecItemAdd(add as CFDictionary, nil)
             if status == errSecDuplicateItem {
                 status = SecItemUpdate(base as CFDictionary, value as CFDictionary)
             }

@@ -267,6 +267,15 @@ final class AppModel {
     // per executable path → cached permanently for the session.
     private var signatureCache: [String: SignatureInfo] = [:]
     private var signatureInFlight: Set<String> = []
+    /// File identity (dev, inode, size, mtime) at the time each path was verified,
+    /// so a binary replaced in place is re-verified instead of showing a stale signer.
+    private var signatureStamp: [String: String] = [:]
+
+    private static func fileStamp(_ path: String) -> String? {
+        var st = stat()
+        guard stat(path, &st) == 0 else { return nil }
+        return "\(st.st_dev):\(st.st_ino):\(st.st_size):\(st.st_mtimespec.tv_sec):\(st.st_mtimespec.tv_nsec)"
+    }
     private let maxConcurrentSignatureLookups = 8
     private let maxNewSignatureLookupsPerRefresh = 12
 
@@ -963,7 +972,7 @@ final class AppModel {
             guard let path = record.executablePath else { continue }
 
             // Already resolved → merge the cached result.
-            if let cached = signatureCache[path] {
+            if let cached = signatureCache[path], signatureStamp[path] == Self.fileStamp(path) {
                 processes[id]?.signing = cached
                 continue
             }
@@ -978,8 +987,10 @@ final class AppModel {
             signatureInFlight.insert(path)
             startedThisRefresh += 1
             let signing = self.signing
+            let stamp = Self.fileStamp(path)
             Task { @MainActor in
                 var info = await signing.signature(forPath: path)
+                self.signatureStamp[path] = stamp
                 if let sha = info.sha256, sha == self.signatureCache[path]?.sha256, info.virusTotal == nil {
                     info.virusTotal = self.signatureCache[path]?.virusTotal
                 }

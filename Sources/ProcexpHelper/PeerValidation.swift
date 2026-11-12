@@ -20,6 +20,13 @@ enum PeerValidation {
 
     private static let officialAppIdentifier = HelperConstants.officialAppBundleID
 
+    /// App identifier a connecting client must carry for this helper's flavor.
+    private static var expectedAppIdentifier: String {
+        HelperConstants.machServiceName == HelperConstants.developmentHelperBundleID
+            ? HelperConstants.developmentAppBundleID
+            : HelperConstants.officialAppBundleID
+    }
+
     private static let log = Logger(
         subsystem: HelperConstants.machServiceName,
         category: "peer"
@@ -51,7 +58,30 @@ enum PeerValidation {
         }
 
         #if DEBUG
-        log.notice("peer pid \(pid): accepting intact ad-hoc signature in DEBUG build")
+        // Debug builds accept a self-signed development identity, but they must
+        // still reject arbitrary local processes: the peer has to be signed by
+        // the same certificate as this helper and carry the app's identifier,
+        // because a self-signed identity has no Team ID to compare.
+        var ownCode: SecCode?
+        guard SecCodeCopySelf(SecCSFlags(rawValue: 0), &ownCode) == errSecSuccess,
+              let ownInformation = signingInformation(of: ownCode),
+              let ownCertificates = ownInformation[kSecCodeInfoCertificates] as? [SecCertificate],
+              let ownLeaf = ownCertificates.first,
+              let peerInformation = signingInformation(of: code),
+              let peerIdentifier = peerInformation[kSecCodeInfoIdentifier] as? String,
+              peerIdentifier == expectedAppIdentifier,
+              let peerCertificates = peerInformation[kSecCodeInfoCertificates] as? [SecCertificate],
+              let peerLeaf = peerCertificates.first
+        else {
+            log.error("peer pid \(pid): missing a development identity matching \(expectedAppIdentifier); rejected")
+            return false
+        }
+        guard (SecCertificateCopyData(peerLeaf) as Data) == (SecCertificateCopyData(ownLeaf) as Data) else {
+            log.error("peer pid \(pid): signed by a different certificate than this helper; rejected")
+            return false
+        }
+
+        log.notice("peer pid \(pid): development identity verified in DEBUG build; accepted")
         return true
         #else
         guard let teamIdentifier = ownTeamIdentifier() else {
@@ -116,5 +146,31 @@ enum PeerValidation {
         }
 
         return information[kSecCodeInfoTeamIdentifier] as? String
+    }
+
+    /// Signing information (identifier and certificates) for `code`.
+    private static func signingInformation(of code: SecCode?) -> [CFString: Any]? {
+        guard let code else { return nil }
+
+        var staticCode: SecStaticCode?
+        guard SecCodeCopyStaticCode(
+            code,
+            SecCSFlags(rawValue: 0),
+            &staticCode
+        ) == errSecSuccess,
+              let staticCode else {
+            return nil
+        }
+
+        var information: CFDictionary?
+        guard SecCodeCopySigningInformation(
+            staticCode,
+            SecCSFlags(rawValue: 0),
+            &information
+        ) == errSecSuccess else {
+            return nil
+        }
+
+        return information as? [CFString: Any]
     }
 }

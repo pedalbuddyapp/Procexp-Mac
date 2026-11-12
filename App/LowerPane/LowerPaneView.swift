@@ -67,6 +67,24 @@ struct ModuleRow: Identifiable, Hashable, Sendable {
     var size: UInt64 { module.size }
 }
 
+/// A resolved signature stored with the identity of the file it was verified
+/// against, so a file that changes after verification is not reported with its
+/// old signer or hash.
+struct CachedModuleSignature {
+    struct Identity: Equatable {
+        let size: UInt64
+        let modified: Date?
+    }
+
+    let signature: SignatureInfo
+    let identity: Identity?
+
+    func isCurrent(for current: Identity?) -> Bool {
+        guard let current, let identity else { return false }
+        return identity == current
+    }
+}
+
 struct LowerPaneView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openWindow) private var openWindow
@@ -74,7 +92,7 @@ struct LowerPaneView: View {
     // Fetched lists (both kept so a mode switch shows instantly on next tick).
     @State private var moduleRows: [ModuleRow] = []
     @State private var moduleHighlights: [String: TimedListRowHighlight] = [:]
-    @State private var moduleSignatureCache: [String: SignatureInfo] = [:]
+    @State private var moduleSignatureCache: [String: CachedModuleSignature] = [:]
     // The set of image IDs the provider actually reported last cycle (excludes
     // fading "deleted" ghosts) plus the ghost rows still being shown, so the
     // diff highlighting can retire a deleted row once its highlight expires.
@@ -404,6 +422,7 @@ struct LowerPaneView: View {
         displayedProcessID = model.selection
         reportError = nil
         moduleRows = []
+        moduleSignatureCache = [:]
         descriptors = []
         threads = []
         moduleHighlights = [:]
@@ -443,18 +462,16 @@ struct LowerPaneView: View {
             do {
                 let result = try await model.data.modules(of: pid)
                 guard !Task.isCancelled else { return }
-                let rows = await Self.buildRows(
+                let built = await Self.buildRows(
                     result,
                     signing: model.signing,
                     cachedSignatures: moduleSignatureCache
                 )
                 guard !Task.isCancelled, model.selection == pid, model.lowerPaneMode == mode else { return }
-                for row in rows where row.signature != nil {
-                    moduleSignatureCache[row.path] = row.signature
-                }
-                moduleRows = mergeModuleRows(rows)
+                moduleSignatureCache = built.cache
+                moduleRows = mergeModuleRows(built.rows)
                 reportError = nil
-                note = rows.isEmpty
+                note = built.rows.isEmpty
                     ? emptyModulesNote(record: model.snapshot.info(pid))
                     : nil
             } catch {
@@ -587,24 +604,31 @@ struct LowerPaneView: View {
     }
 
     /// Builds displayable image rows, resolving bundle metadata off the main
-    /// actor so a large module list never hitches the UI.
+    /// actor so a large module list never hitches the UI. Also returns the
+    /// signature cache with every entry tied to the file identity it was
+    /// resolved against.
     private nonisolated static func buildRows(
         _ modules: [ModuleInfo],
         signing: any SigningProviding,
-        cachedSignatures: [String: SignatureInfo]
-    ) async -> [ModuleRow] {
-        await Task.detached(priority: .utility) { () async -> [ModuleRow] in
+        cachedSignatures: [String: CachedModuleSignature]
+    ) async -> (rows: [ModuleRow], cache: [String: CachedModuleSignature]) {
+        await Task.detached(priority: .utility) { () async -> ([ModuleRow], [String: CachedModuleSignature]) in
             var rows: [ModuleRow] = []
+            var cache = cachedSignatures
             rows.reserveCapacity(modules.count)
             for module in modules {
                 let meta = ModuleMetadata.resolve(path: module.path)
+                let identity = Self.fileIdentity(atPath: module.path)
                 let signature: SignatureInfo?
                 if let existing = module.signing {
                     signature = existing
-                } else if let cached = cachedSignatures[module.path] {
-                    signature = cached
+                } else if let cached = cachedSignatures[module.path], cached.isCurrent(for: identity) {
+                    signature = cached.signature
                 } else {
                     signature = await signing.signature(forPath: module.path)
+                }
+                if module.signing == nil, let signature {
+                    cache[module.path] = CachedModuleSignature(signature: signature, identity: identity)
                 }
                 rows.append(ModuleRow(
                     module: module,
@@ -614,8 +638,20 @@ struct LowerPaneView: View {
                     signature: signature
                 ))
             }
-            return rows
+            return (rows, cache)
         }.value
+    }
+
+    /// Identity of the file currently at `path`, used to tell whether a cached
+    /// signature still describes the same file. `nil` when the file cannot be
+    /// examined, which always forces a fresh verification.
+    private nonisolated static func fileIdentity(atPath path: String) -> CachedModuleSignature.Identity? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+              let size = (attributes[.size] as? NSNumber)?.uint64Value else { return nil }
+        return CachedModuleSignature.Identity(
+            size: size,
+            modified: attributes[.modificationDate] as? Date
+        )
     }
 
     // MARK: Helpers

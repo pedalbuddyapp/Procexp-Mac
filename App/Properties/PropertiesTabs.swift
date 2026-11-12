@@ -396,7 +396,7 @@ struct ImageTab: View {
             }
             Button {
                 guard let path = record.executablePath, !path.isEmpty else { return }
-                Task { await detail.verifySignature(path: path, signing: model.signing) }
+                Task { await detail.verifySignature(path: path, signing: model.signing, processStart: record.startTimeDate) }
             } label: {
                 if detail.isVerifying {
                     ProgressView().controlSize(.small)
